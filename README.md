@@ -2,7 +2,7 @@
 
 
 
-Copy a file with and a progress bar 
+Copy a file with a progress bar 
 
 Enter address with two \ example : 
 ``` e:\\file.txt ```
