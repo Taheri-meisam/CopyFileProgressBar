@@ -24,6 +24,8 @@ for you.
 - If the destination file exists, you're asked before it is overwritten.
 - Copying a file onto itself is refused.
 - If the copy fails (for example, the disk is full), the partial file is deleted.
+- Output is colored in a terminal. Colors turn off automatically when the
+  output is redirected to a file, or when the `NO_COLOR` environment variable is set.
 
 The program exits with `0` on success, `1` if the copy failed or was
 cancelled, and `2` for bad arguments.
@@ -36,9 +38,8 @@ uses C++17 (for `std::filesystem`).
 On Linux or macOS, from the repository root:
 
 ```
-g++ -std=c++17 -O2 -o copy-progress CopyFileProgressBar/CopyFileProgressBar.cpp
+make
 ./copy-progress ~/videos/movie.mkv ~/backup/
 ```
 
-(The output can't be named `CopyFileProgressBar`, since a folder with that
-name already exists there.)
+`make clean` deletes the built program.
