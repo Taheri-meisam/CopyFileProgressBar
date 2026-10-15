@@ -2,12 +2,24 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <system_error>
 #include <vector>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
+#else
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
@@ -18,16 +30,78 @@ constexpr std::size_t kBufferSize = 1024 * 1024; // copy in 1 MB chunks
 constexpr int kBarWidth = 40;
 constexpr auto kRedrawInterval = std::chrono::milliseconds(200);
 
+// ANSI color codes
+const char* const kReset = "\033[0m";
+const char* const kBold = "\033[1m";
+const char* const kRed = "\033[1;31m";
+const char* const kGreen = "\033[32m";
+const char* const kBoldGreen = "\033[1;32m";
+const char* const kYellow = "\033[33m";
+const char* const kBoldYellow = "\033[1;33m";
+const char* const kCyan = "\033[36m";
+const char* const kGray = "\033[90m";
+
+// Set in main(): whether stdout / stderr are terminals that understand colors.
+bool g_colorOut = false;
+bool g_colorErr = false;
+
+// https://no-color.org: a non-empty NO_COLOR variable turns colors off.
+bool noColorRequested()
+{
+#ifdef _WIN32
+    return GetEnvironmentVariableA("NO_COLOR", nullptr, 0) > 1; // size includes the terminating null
+#else
+    const char* value = std::getenv("NO_COLOR");
+    return value != nullptr && value[0] != '\0';
+#endif
+}
+
+// Colors are only used on a real terminal, so redirecting output to a file
+// doesn't fill it with escape codes.
+bool supportsColor(bool forStderr)
+{
+    if (noColorRequested())
+        return false;
+#ifdef _WIN32
+    // Windows 10+ consoles understand ANSI codes once virtual terminal processing is enabled.
+    HANDLE handle = GetStdHandle(forStderr ? STD_ERROR_HANDLE : STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if (handle == INVALID_HANDLE_VALUE || !GetConsoleMode(handle, &mode))
+        return false;
+    return SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+#else
+    if (!isatty(forStderr ? STDERR_FILENO : STDOUT_FILENO))
+        return false;
+    const char* term = std::getenv("TERM");
+    return term == nullptr || std::string(term) != "dumb";
+#endif
+}
+
+std::string paint(const std::string& text, const char* style, bool enabled = g_colorOut)
+{
+    return enabled ? style + text + kReset : text;
+}
+
+std::ostream& errorOut()
+{
+    return std::cerr << paint("Error:", kRed, g_colorErr) << ' ';
+}
+
 double secondsSince(Clock::time_point start)
 {
     return std::chrono::duration<double>(Clock::now() - start).count();
+}
+
+std::string formatSpeed(std::uintmax_t bytes, double seconds)
+{
+    return formatBytes(static_cast<std::uintmax_t>(static_cast<double>(bytes) / seconds)) + "/s";
 }
 
 // Reads a whole line so paths containing spaces work, and strips the quotes
 // Windows adds when you use "Copy as path".
 std::string readPath(const std::string& prompt)
 {
-    std::cout << prompt;
+    std::cout << paint(prompt, kBold);
     std::string line;
     std::getline(std::cin, line);
 
@@ -44,7 +118,7 @@ std::string readPath(const std::string& prompt)
 
 bool askYesNo(const std::string& question)
 {
-    std::cout << question << " [y/N]: ";
+    std::cout << paint(question, kYellow) << " [y/N]: ";
     std::string answer;
     std::getline(std::cin, answer);
     return !answer.empty() && (answer[0] == 'y' || answer[0] == 'Y');
@@ -55,14 +129,17 @@ void drawProgress(std::uintmax_t copied, std::uintmax_t total, double elapsedSec
     const int percent = total == 0 ? 100 : static_cast<int>(copied * 100 / total);
     const int filled = percent * kBarWidth / 100;
 
+    std::ostringstream percentText;
+    percentText << std::setw(3) << percent << '%';
+
     std::ostringstream line;
     line << '\r' << '['
-         << std::string(static_cast<std::size_t>(filled), '#')
-         << std::string(static_cast<std::size_t>(kBarWidth - filled), '-')
-         << "] " << std::setw(3) << percent << "%  "
+         << paint(std::string(static_cast<std::size_t>(filled), '#'), kGreen)
+         << paint(std::string(static_cast<std::size_t>(kBarWidth - filled), '-'), kGray)
+         << "] " << paint(percentText.str(), kBold) << "  "
          << formatBytes(copied) << " / " << formatBytes(total);
     if (elapsedSeconds > 0.0)
-        line << "  " << formatBytes(static_cast<std::uintmax_t>(static_cast<double>(copied) / elapsedSeconds)) << "/s";
+        line << "  " << paint(formatSpeed(copied, elapsedSeconds), kCyan);
     line << "    "; // overwrite leftovers from a previously longer line
 
     std::cout << line.str() << std::flush;
@@ -74,7 +151,8 @@ bool failCopy(std::ofstream& out, const fs::path& destination, const std::string
     out.close();
     std::error_code ec;
     fs::remove(destination, ec);
-    std::cerr << "\nError: " << reason << '\n';
+    std::cerr << '\n';
+    errorOut() << reason << '\n';
     return false;
 }
 
@@ -84,7 +162,7 @@ bool preparePaths(const fs::path& source, fs::path& destination)
 {
     std::error_code ec;
     if (!fs::is_regular_file(source, ec)) {
-        std::cerr << "Error: \"" << source.string() << "\" does not exist or is not a file.\n";
+        errorOut() << '"' << source.string() << "\" does not exist or is not a file.\n";
         return false;
     }
 
@@ -95,16 +173,16 @@ bool preparePaths(const fs::path& source, fs::path& destination)
     if (fs::exists(destination, ec)) {
         // Opening the destination for writing would empty the source if they are the same file.
         if (fs::equivalent(source, destination, ec)) {
-            std::cerr << "Error: source and destination are the same file.\n";
+            errorOut() << "source and destination are the same file.\n";
             return false;
         }
         if (!askYesNo("\"" + destination.string() + "\" already exists. Overwrite?")) {
-            std::cout << "Copy cancelled.\n";
+            std::cout << paint("Copy cancelled.", kYellow) << '\n';
             return false;
         }
     }
     else if (destination.has_parent_path() && !fs::is_directory(destination.parent_path(), ec)) {
-        std::cerr << "Error: folder \"" << destination.parent_path().string() << "\" does not exist.\n";
+        errorOut() << "folder \"" << destination.parent_path().string() << "\" does not exist.\n";
         return false;
     }
     return true;
@@ -143,23 +221,23 @@ bool copyFileWithProgress(const fs::path& source, const fs::path& destination)
     std::error_code ec;
     const std::uintmax_t total = fs::file_size(source, ec);
     if (ec) {
-        std::cerr << "Error: cannot read the size of \"" << source.string() << "\": " << ec.message() << '\n';
+        errorOut() << "cannot read the size of \"" << source.string() << "\": " << ec.message() << '\n';
         return false;
     }
 
     std::ifstream in(source, std::ios::binary);
     if (!in) {
-        std::cerr << "Error: cannot open \"" << source.string() << "\" for reading.\n";
+        errorOut() << "cannot open \"" << source.string() << "\" for reading.\n";
         return false;
     }
     std::ofstream out(destination, std::ios::binary | std::ios::trunc);
     if (!out) {
-        std::cerr << "Error: cannot create \"" << destination.string() << "\".\n";
+        errorOut() << "cannot create \"" << destination.string() << "\".\n";
         return false;
     }
 
-    std::cout << "Copying \"" << source.string() << "\" -> \"" << destination.string()
-              << "\" (" << formatBytes(total) << ")\n";
+    std::cout << paint("Copying", kBold) << " \"" << source.string() << "\" -> \"" << destination.string()
+              << "\" " << paint("(" + formatBytes(total) + ")", kGray) << '\n';
 
     std::vector<char> buffer(kBufferSize);
     std::uintmax_t copied = 0;
@@ -200,19 +278,22 @@ bool copyFileWithProgress(const fs::path& source, const fs::path& destination)
 
     const double elapsed = secondsSince(start);
     drawProgress(copied, copied, elapsed);
-    std::cout << "\nCopy finished in " << formatDuration(elapsed);
+    std::cout << '\n' << paint("Copy finished", kBoldGreen) << " in " << formatDuration(elapsed);
     if (elapsed > 0.0)
-        std::cout << " (average " << formatBytes(static_cast<std::uintmax_t>(static_cast<double>(copied) / elapsed)) << "/s)";
+        std::cout << " (average " << paint(formatSpeed(copied, elapsed), kCyan) << ')';
     std::cout << '\n';
 
     if (copied != total)
-        std::cerr << "Warning: expected " << total << " bytes but copied " << copied
-                  << ". The source may have changed during the copy.\n";
+        std::cerr << paint("Warning:", kBoldYellow, g_colorErr) << " expected " << total << " bytes but copied "
+                  << copied << ". The source may have changed during the copy.\n";
     return true;
 }
 
 int main(int argc, char* argv[])
 {
+    g_colorOut = supportsColor(false);
+    g_colorErr = supportsColor(true);
+
     fs::path source;
     fs::path destination;
 
@@ -231,7 +312,7 @@ int main(int argc, char* argv[])
     }
 
     if (source.empty() || destination.empty()) {
-        std::cerr << "Error: both a source and a destination are required.\n";
+        errorOut() << "both a source and a destination are required.\n";
         return 2;
     }
 
