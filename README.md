@@ -33,8 +33,12 @@ cancelled, and `2` for bad arguments.
 Open `CopyFileProgressBar.sln` in Visual Studio 2019 or later. The project
 uses C++17 (for `std::filesystem`).
 
-On Linux or macOS:
+On Linux or macOS, from the repository root:
 
 ```
-g++ -std=c++17 -O2 -o CopyFileProgressBar CopyFileProgressBar/CopyFileProgressBar.cpp
+g++ -std=c++17 -O2 -o copy-progress CopyFileProgressBar/CopyFileProgressBar.cpp
+./copy-progress ~/videos/movie.mkv ~/backup/
 ```
+
+(The output can't be named `CopyFileProgressBar`, since a folder with that
+name already exists there.)
